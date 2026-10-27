@@ -44,6 +44,9 @@ Supersedes the earlier "Phase 2" sketch. The service takes a primary screen and 
 2. **Set constraints:** number of top leads, plates available (96-well), controls per plate, dose points, top concentration and dilution factor, liquid handler limits (guess: max dispenses per run, max plates per run, minutes per plate), alpha, target power.
 3. **Service proposes the design** and the dashboard shows it (below).
 
+### Success criterion
+The design is acceptable when there is enough power (default 80%, alpha 0.05 after Bonferroni) to distinguish the efficacy of the leads from each other. The binding comparison is the closest pair of leads in the ranking (the smallest expected |d|), since if that pair is resolved the wider gaps are too. The budget solver picks replicates to meet this; if the plates or handler limits cannot, the dashboard reports the achievable power and the smallest difference that is resolvable instead.
+
 ### Design logic
 1. **Lead selection:** rank by % activity after QC (drop plates with Z' < 0.5 and flagged interferers); take the top N.
 2. **Priors for the 4PL:** the single dose gives only top-ish information, so assume hill = 1, bottom = control level, top from the screen activity, and EC50 uncertain over about 3 logs. The dose series is a half-log ladder spanning that range so the design is robust to a wrong EC50 guess.
@@ -69,7 +72,7 @@ Supersedes the earlier "Phase 2" sketch. The service takes a primary screen and 
 (a) screen simulator + CSV, (b) 4PL fit (scipy `curve_fit`) and Jacobian power, (c) lead selection and budget solver, (d) blocked layout + downloads, (e) dashboard wiring, (f) confounder toggles, (g) Monte Carlo check.
 
 ### Calls I made (to confirm or overturn)
-- "Distinguish the effectiveness of compounds" is taken as efficacy (Emax) between leads, EC50 secondary.
+- "Enough power to distinguish the efficacy of compounds" (confirmed) is taken as Emax differences between leads, checked on the closest-ranked pair, EC50 secondary.
 - Wald test with Bonferroni, backed by Monte Carlo, rather than a full mixed model.
 - Liquid handler limits are a plain count/time budget, not a specific instrument's worklist format.
 - 96-well only for this flow (the generic calculator still supports 144 and 384).
