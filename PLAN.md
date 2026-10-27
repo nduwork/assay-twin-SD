@@ -8,6 +8,7 @@ Given a proposed screen (compounds, doses, targets, plate format) and assay stat
 |---|---|---|
 | Design | plate format | 96 (8x12), 144 (9x16, assumed), 384 (16x24) |
 | | compounds, doses/compound, targets | full factorial: compound x dose x target |
+| | top concentration, dilution factor | dose series in µM, default 10 µM top, 1:3 down |
 | | vehicle control wells/plate | on every plate |
 | | skip edge wells | mitigates edge effect |
 | Stats | minimum effect (delta), well SD | signal units |
@@ -34,11 +35,20 @@ Given a proposed screen (compounds, doses, targets, plate format) and assay stat
 ## Phase 2 design from data (simulate -> estimate -> redesign)
 Closes the loop: the power calc above needs delta and SD, which in practice come from a previous screen. Simulated data stands in for that screen and uses the same pipe as real data.
 
-1. **Simulate** a screen on the current layout. Per well:
+1. **Simulate** a screen on the current layout. Per well: **(done)**
    `y = baseline + plate_effect + edge_effect + top * dose^h / (EC50^h + dose^h) + noise`
-   - truth table per compound x target: active or not, EC50, Hill slope h, max effect (inactive = 0); hit rate is an input.
-   - nuisance: plate offset ~ N(0, sd_plate), optional edge gradient, noise ~ N(0, sd_well) (optionally multiplicative/CV).
-   - seeded, so a run reproduces. Returns a long table: plate, well, compound, dose, target, value.
+   - truth table per compound x target, drawn independently: active with probability = hit rate (default 0.25);
+     EC50 log-uniform from half a log below to half a log above the tested range (some hits partial or invisible);
+     Hill slope U(0.7, 2); top U(0.5, 2) x delta, increasing only; inactive top = 0.
+   - nuisance: baseline 100; plate offset ~ N(0, sd_plate), default 0.5 x well SD; optional edge gradient
+     (full at the outer ring, halving per ring inward; default off); noise additive N(0, sd) or multiplicative with CV = sd / baseline.
+   - own seed (separate from the layout seed), so a run reproduces. `POST /api/simulate` returns the long table
+     (plate, well, compound, target, dose, conc_uM, value), the truth table and plate offsets; the page shows a
+     heatmap on the plate grid and downloads the table as CSV.
+   - **Monte Carlo replicate curve (done, pulled forward from step 5):** `POST /api/mc` runs the pooled t-test the
+     power calc assumes on simulated data at 12 replicate counts. It plots power at exactly delta (matches the analytic
+     curve when sd_plate = 0; falls below it with plate offsets), hit recovery over true actives, and false-positive rate.
+     Wells land on random plates and positions rather than the exact layout.
 2. **Ingest**: `POST /api/simulate` returns that table; `POST /api/upload` accepts the same columns as CSV, so real data replaces simulated data with no other change.
 3. **Estimate** (numpy/scipy only): well SD from vehicle wells (pooled and per plate, giving a plate variance component), per-compound x target hit call (vehicle-corrected, multiplicity-adjusted), 4-parameter Hill fit for EC50 and max effect with CI.
 4. **Redesign phase 2** from the estimates:
@@ -62,5 +72,6 @@ Build order: (a) simulate + long table, (b) estimators, (c) phase 2 derivation i
 ## Run
 ```
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python app.py   # http://localhost:5000
+.venv/bin/python app.py   # runs the __main__ checks, then http://localhost:5000
+# Windows: .venv\Scripts\python app.py
 ```
