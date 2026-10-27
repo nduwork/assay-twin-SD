@@ -31,11 +31,33 @@ Given a proposed screen (compounds, doses, targets, plate format) and assay stat
 ## API
 `POST /api/plan` (JSON of the inputs) -> plan + curve + layout; 400 with `{error}` on bad input. `GET /` serves the page, which recomputes on every input change (200 ms debounce).
 
+## Phase 2 design from data (simulate -> estimate -> redesign)
+Closes the loop: the power calc above needs delta and SD, which in practice come from a previous screen. Simulated data stands in for that screen and uses the same pipe as real data.
+
+1. **Simulate** a screen on the current layout. Per well:
+   `y = baseline + plate_effect + edge_effect + top * dose^h / (EC50^h + dose^h) + noise`
+   - truth table per compound x target: active or not, EC50, Hill slope h, max effect (inactive = 0); hit rate is an input.
+   - nuisance: plate offset ~ N(0, sd_plate), optional edge gradient, noise ~ N(0, sd_well) (optionally multiplicative/CV).
+   - seeded, so a run reproduces. Returns a long table: plate, well, compound, dose, target, value.
+2. **Ingest**: `POST /api/simulate` returns that table; `POST /api/upload` accepts the same columns as CSV, so real data replaces simulated data with no other change.
+3. **Estimate** (numpy/scipy only): well SD from vehicle wells (pooled and per plate, giving a plate variance component), per-compound x target hit call (vehicle-corrected, multiplicity-adjusted), 4-parameter Hill fit for EC50 and max effect with CI.
+4. **Redesign phase 2** from the estimates:
+   - carry forward only hits (plus controls); drop inactive compounds so plates are spent on what matters;
+   - re-centre the dose series around each hit's EC50 (e.g. half-log steps spanning 0.1x-10x);
+   - set delta to the smallest effect worth resolving (default: the weakest carried hit's estimated effect) and SD to the estimated SD, then re-run the power calc for the replicate count;
+   - include the plate variance component by raising the control count or blocking by plate if it is large;
+   - emit the phase 2 layout through the existing plate view.
+5. **Validate** the planner: repeat simulate -> estimate -> redesign N times (Monte Carlo) and report hit recovery, false-positive rate and the spread of fitted EC50 against truth. Doubles as a check of the analytic power.
+
+New UI: a "Simulate screen" button, then panels for estimates (SD, plate variance, hit table, fitted curves) and a "Design phase 2" button that fills the form with the derived inputs and shows the new layout beside phase 1.
+
+Build order: (a) simulate + long table, (b) estimators, (c) phase 2 derivation into the existing form, (d) CSV upload, (e) Monte Carlo validation.
+
 ## Known limits / next steps
 - Pairwise t-test vs control, not Dunnett; wells assumed independent with equal SD.
 - Randomisation is unblocked: no plate/row/column effects, no true DOE designs (fractional factorial, response surface).
 - Layout is random, not optimised (e.g. no balancing of compounds across plates, no edge-effect modelling).
-- Next, if needed: Dunnett or simulation-based power, plate-effect variance component, balanced block design, CSV export of the layout.
+- Next, if needed: Dunnett power, balanced block design, CSV export of the layout (power now also checked by Monte Carlo in the phase 2 section).
 
 ## Run
 ```
