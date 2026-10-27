@@ -43,6 +43,14 @@ A dose-response simulator on the generic calculator's factorial layout; reusable
 - `POST /api/simulate`: long table (plate, well, compound, target, dose, conc_uM, value) + truth table + plate offsets; page shows a value heatmap on the plate grid and downloads CSV.
 - `POST /api/mc`: Monte Carlo of the pooled t-test vs vehicle at 12 replicate counts: power at exactly delta (matches analytic within MC error when plate SD = 0, drops from 0.83 to 0.72 at the defaults with plate offsets), hit recovery over true actives, false-positive rate.
 
+### Artifact dashboard (`dashboard.html`)
+Hosting is a concern, so the follow-up design is also a static artifact page: everything runs in the browser (4PL fit, Fisher-information power, blocked layout, downloads), no server.
+- **Input:** the simulator's long table (`sample_screen.csv`): `plate, well, compound, target, dose, conc_uM, value`. Vehicle wells are `compound = vehicle` (conc 0). A single-dose screen (`compound`, `value`) also works.
+- **Ingest:** each plate's vehicle mean is subtracted; well SD comes from within-plate vehicle spread, plate-offset SD from the spread of plate vehicle means. Top concentration, dose count and dilution factor are filled from the data. With several targets the user picks one.
+- **Leads:** ranked by effect at the top dose. Where a compound has 4 or more doses, top/EC50/Hill come from a Levenberg-Marquardt fit (bottom fixed at 0 after vehicle subtraction); otherwise from the one-dose assumption. On the example file the fitted top and EC50 of the five leads are within about 30% of the simulator's truth.
+- **Design and outputs:** as in the sections above, with a smallest efficacy difference to resolve (readout units) as the success criterion. Visible inputs are limited to top leads, plates, dose points, top concentration, that difference and target power; the rest sit under Advanced settings.
+- **Not yet in the page:** Monte Carlo confirmation of the power numbers (the Flask `/api/mc` does this for the generic calculator).
+
 ### Data we have and collect
 - **Primary screen (one dose, often n=1-2):** compound id, concentration, raw signal, % activity normalised to plate controls, plate, well, per-plate QC (Z', control CV, signal window). Hit calls come from % activity, z-score or robust MAD.
 - **Follow-up (to be collected):** 8-12 point dose-response per lead, replicates across plates, fitted with a 4-parameter logistic (4PL): `y = bottom + (top - bottom) / (1 + (EC50/x)^hill)`. Efficacy is `top` (Emax), potency is EC50.
