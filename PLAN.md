@@ -32,36 +32,59 @@ Given a proposed screen (compounds, doses, targets, plate format) and assay stat
 ## API
 `POST /api/plan` (JSON of the inputs) -> plan + curve + layout; 400 with `{error}` on bad input. `GET /` serves the page, which recomputes on every input change (200 ms debounce).
 
-## Phase 2 design from data (simulate -> estimate -> redesign)
-Closes the loop: the power calc above needs delta and SD, which in practice come from a previous screen. Simulated data stands in for that screen and uses the same pipe as real data.
+## Follow-up dose-response design (drug-discovery flow)
+Supersedes the earlier "Phase 2" sketch. The service takes a primary screen and designs the 96-well dose-response follow-up for the top leads.
 
-1. **Simulate** a screen on the current layout. Per well: **(done)**
-   `y = baseline + plate_effect + edge_effect + top * dose^h / (EC50^h + dose^h) + noise`
-   - truth table per compound x target, drawn independently: active with probability = hit rate (default 0.25);
-     EC50 log-uniform from half a log below to half a log above the tested range (some hits partial or invisible);
-     Hill slope U(0.7, 2); top U(0.5, 2) x delta, increasing only; inactive top = 0.
-   - nuisance: baseline 100; plate offset ~ N(0, sd_plate), default 0.5 x well SD; optional edge gradient
-     (full at the outer ring, halving per ring inward; default off); noise additive N(0, sd) or multiplicative with CV = sd / baseline.
-   - own seed (separate from the layout seed), so a run reproduces. `POST /api/simulate` returns the long table
-     (plate, well, compound, target, dose, conc_uM, value), the truth table and plate offsets; the page shows a
-     heatmap on the plate grid and downloads the table as CSV.
-   - **Monte Carlo replicate curve (done, pulled forward from step 5):** `POST /api/mc` runs the pooled t-test the
-     power calc assumes on simulated data at 12 replicate counts. It plots power at exactly delta (matches the analytic
-     curve when sd_plate = 0; falls below it with plate offsets), hit recovery over true actives, and false-positive rate.
-     Wells land on random plates and positions rather than the exact layout.
-2. **Ingest**: `POST /api/simulate` returns that table; `POST /api/upload` accepts the same columns as CSV, so real data replaces simulated data with no other change.
-3. **Estimate** (numpy/scipy only): well SD from vehicle wells (pooled and per plate, giving a plate variance component), per-compound x target hit call (vehicle-corrected, multiplicity-adjusted), 4-parameter Hill fit for EC50 and max effect with CI.
-4. **Redesign phase 2** from the estimates:
-   - carry forward only hits (plus controls); drop inactive compounds so plates are spent on what matters;
-   - re-centre the dose series around each hit's EC50 (e.g. half-log steps spanning 0.1x-10x);
-   - set delta to the smallest effect worth resolving (default: the weakest carried hit's estimated effect) and SD to the estimated SD, then re-run the power calc for the replicate count;
-   - include the plate variance component by raising the control count or blocking by plate if it is large;
-   - emit the phase 2 layout through the existing plate view.
-5. **Validate** the planner: repeat simulate -> estimate -> redesign N times (Monte Carlo) and report hit recovery, false-positive rate and the spread of fitted EC50 against truth. Doubles as a check of the analytic power.
+### Built so far (generic calculator, `app.py`)
+A dose-response simulator on the generic calculator's factorial layout; reusable for (a) and (g) of the build order below, but not yet the single-dose primary screen (% activity, Z', QC) this flow describes.
+- `y = baseline + plate_offset + edge + top * x^h / (EC50^h + x^h) + noise`, x from top concentration and dilution factor.
+  Truth per compound x target: active with p = hit rate (0.25); EC50 log-uniform half a log beyond each end of the tested range; hill U(0.7, 2); top U(0.5, 2) x delta, increasing only.
+  Nuisance: plate offset SD (default 0.5 x well SD), optional edge gradient (halves per ring inward), additive or multiplicative (CV = SD / baseline) noise. Own seed.
+- `POST /api/simulate`: long table (plate, well, compound, target, dose, conc_uM, value) + truth table + plate offsets; page shows a value heatmap on the plate grid and downloads CSV.
+- `POST /api/mc`: Monte Carlo of the pooled t-test vs vehicle at 12 replicate counts: power at exactly delta (matches analytic within MC error when plate SD = 0, drops from 0.83 to 0.72 at the defaults with plate offsets), hit recovery over true actives, false-positive rate.
 
-New UI: a "Simulate screen" button, then panels for estimates (SD, plate variance, hit table, fitted curves) and a "Design phase 2" button that fills the form with the derived inputs and shows the new layout beside phase 1.
+### Data we have and collect
+- **Primary screen (one dose, often n=1-2):** compound id, concentration, raw signal, % activity normalised to plate controls, plate, well, per-plate QC (Z', control CV, signal window). Hit calls come from % activity, z-score or robust MAD.
+- **Follow-up (to be collected):** 8-12 point dose-response per lead, replicates across plates, fitted with a 4-parameter logistic (4PL): `y = bottom + (top - bottom) / (1 + (EC50/x)^hill)`. Efficacy is `top` (Emax), potency is EC50.
+- **Confounders to design against:** plate/batch offset, edge effect, row/column drift, time-on-deck and dispense-order effects, tip carryover, DMSO tolerance, assay-interference compounds (fluorescent, aggregators), cell passage/day. Each is something the layout or the power calc must account for, not just ignore.
 
-Build order: (a) simulate + long table, (b) estimators, (c) phase 2 derivation into the existing form, (d) CSV upload, (e) Monte Carlo validation.
+### User flow
+1. **Simulate a primary screen** (hit rate, activity distribution, plate noise are inputs), download as CSV. Uploading a real CSV with the same columns replaces it.
+2. **Set constraints:** number of top leads, plates available (96-well), controls per plate, dose points, top concentration and dilution factor, liquid handler limits (guess: max dispenses per run, max plates per run, minutes per plate), alpha, target power.
+3. **Service proposes the design** and the dashboard shows it (below).
+
+### Success criterion
+The design is acceptable when there is enough power (default 80%, alpha 0.05 after Bonferroni) to distinguish the efficacy of the leads from each other. The binding comparison is the closest pair of leads in the ranking (the smallest expected |d|), since if that pair is resolved the wider gaps are too. The budget solver picks replicates to meet this; if the plates or handler limits cannot, the dashboard reports the achievable power and the smallest difference that is resolvable instead.
+
+### Design logic
+1. **Lead selection:** rank by % activity after QC (drop plates with Z' < 0.5 and flagged interferers); take the top N.
+2. **Priors for the 4PL:** the single dose gives only top-ish information, so assume hill = 1, bottom = control level, top from the screen activity, and EC50 uncertain over about 3 logs. The dose series is a half-log ladder spanning that range so the design is robust to a wrong EC50 guess.
+3. **Noise:** SD from vehicle/positive wells and replicate spread; plate variance as its own component.
+4. **Budget:** wells per lead = doses x replicates; plates needed = ceil(total wells / usable wells per plate). The replicate count is the largest that fits the plates and handler limits, or the smallest that reaches target power. If the two disagree the dashboard flags the design infeasible and shows what to relax.
+5. **Efficacy power (primary goal = tell compounds apart on efficacy):** for each pair of leads, the effect size is `d = (top_i - top_j) / sigma`. Variance of each fitted top comes from the 4PL Jacobian, `Var(theta) = sigma^2 (J'J)^-1`, evaluated at the planned doses and replicates. Test is a Wald z with Bonferroni over the pairs. Reported: power for each pair, the minimum detectable d at target power, and the expected d for the simulated leads. EC50 differences are reported as a secondary result (on the log scale).
+6. **Check by simulation:** repeat simulate -> fit 4PL -> test many times (Monte Carlo), which confirms the analytic power, catches fits that fail to converge, and gives hit recovery and EC50 error against the simulated truth.
+7. **Layout (96 wells):** plate is the block. Each lead's full dose series appears on every plate it is on, with replicates spread across plates so plate effects cancel in the comparison. Vehicle (max) and positive (min) controls are on every plate, split between left and right columns to expose drift. Edge wells hold buffer or vehicle only. Positions are randomised within plate (seeded); the dispense order runs low to high dose within a compound to limit carryover.
+8. **Confounder panel (interactive):** toggles for edge effect, plate offset SD, drift and carryover. Each re-runs the power calc with inflated variance or the simulation with that effect on, and shows how much power it costs and which layout choice protects against it.
+
+### Dashboard
+- Inputs panel and the constraint check (wells, plates, handler time against limits).
+- Lead table: simulated screen activity, planned doses, replicates, expected d, power.
+- Power: pairwise power matrix, power vs replicates, minimum detectable d.
+- Fitted 4PL curves with confidence bands from the simulation.
+- Plate view: per-plate tabs of the 96-well layout (compound, dose, control, buffer), coloured as before, plus a distribution summary (wells per lead and per dose per plate).
+- Downloads: layout CSV (plate, well, compound, concentration, role, dispense order), a liquid handler worklist CSV (source, destination, volume; format to be matched to the instrument), and a design summary (JSON, and the screen CSV).
+
+### Endpoints
+`POST /api/screen` (simulate primary screen, returns CSV rows); `POST /api/design` (screen rows + constraints -> leads, doses, replicates, power, layout); `GET /api/download/<layout|worklist|summary>`. The existing `POST /api/plan` stays for the generic replicate calculator.
+
+### Build order
+(a) screen simulator + CSV, (b) 4PL fit (scipy `curve_fit`) and Jacobian power, (c) lead selection and budget solver, (d) blocked layout + downloads, (e) dashboard wiring, (f) confounder toggles, (g) Monte Carlo check.
+
+### Calls I made (to confirm or overturn)
+- "Enough power to distinguish the efficacy of compounds" (confirmed) is taken as Emax differences between leads, checked on the closest-ranked pair, EC50 secondary.
+- Wald test with Bonferroni, backed by Monte Carlo, rather than a full mixed model.
+- Liquid handler limits are a plain count/time budget, not a specific instrument's worklist format.
+- 96-well only for this flow (the generic calculator still supports 144 and 384).
 
 ## Known limits / next steps
 - Pairwise t-test vs control, not Dunnett; wells assumed independent with equal SD.
